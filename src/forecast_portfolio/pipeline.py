@@ -1,15 +1,19 @@
-"""Seven-stage forecasting pipeline, modeled on forecast.agenticlearning.ai:
+"""Multi-step forecasting pipeline after "Alive and Predicting: A Live Evaluation
+of Multi-Step Forecasting Agents" (Wu, Dai & Ren, NYU/UChicago — the system live
+at forecast.agenticlearning.ai). Stage numbering follows the paper:
 
-  1. plan        (light model)  structured analysis plan
-  2. research    (light model + server-side web_search) evidence dossier
-  3. synthesize  (light model)  condensed dossier
-  4. forecast ×3 (heavy model)  independent, price-BLIND probabilities, in parallel
-  5. critique    (heavy model)  adversarial review that introduces the market price
-  6. integrate   (heavy model)  final probability
-  7. baseline    (light model)  zero-shot control for ablation
+  0. zero-shot baseline (light model)  single call, no tools, no price -> p0
+  1. plan        (light model)  decompose the question, pick tools
+  2. research    (non-LLM tool fanout + light model with web_search)
+  3. synthesize  (light model)  score/condense the evidence
+  4. ensemble    (heavy model)  three price-BLIND perspectives, in parallel:
+                                base-rate / evidence-driven / contrarian -> p4
+  5. critic      (heavy model)  devil's advocate; the market price is HIDDEN
+                                from every stage until here
+  6. final       (heavy model)  integrate, output probability + confidence -> p6
 
-All six probabilities are recorded so the ledger can answer "where does the lift
-come from?" the same way the reference system does.
+Every stage probability is recorded so the report can reproduce the paper's
+per-stage information-coefficient ablation.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ class CritiqueOut(BaseModel):
 
 class FinalOut(BaseModel):
     probability: float
+    confidence: float
     rationale: str
 
 
@@ -49,10 +54,15 @@ class BaselineOut(BaseModel):
     probability: float
 
 
+# The paper's three ensemble perspectives, in this fixed order (the ledger maps
+# them to columns p_f1/p_f2/p_f3):
 PERSONAS = [
-    "an outside-view forecaster: anchor on reference classes and base rates before any story-specific detail",
-    "an inside-view analyst: weigh the latest concrete evidence and causal mechanics most heavily",
-    "a skeptic: assume the consensus narrative is wrong and stress-test how this resolves the unpopular way",
+    "a BASE-RATE forecaster: anchor on reference classes and historical base rates "
+    "before any story-specific detail; ask 'how often do situations like this resolve YES?'",
+    "an EVIDENCE-DRIVEN forecaster: weigh the concrete retrieved evidence most heavily - "
+    "recent developments, primary sources, causal mechanics - and update hard on it",
+    "a CONTRARIAN forecaster: assume the consensus narrative is wrong; build the strongest "
+    "case for the unpopular resolution and only concede what the evidence forces you to",
 ]
 
 
@@ -78,16 +88,21 @@ def _market_brief(market: Market, with_price: bool) -> str:
 class PipelineResult:
     market_id: str
     market_price: float
-    p_forecasters: list[float]
+    p_forecasters: list[float]  # [base-rate, evidence-driven, contrarian]
     p_critic: float
     p_final: float
     p_baseline: float
+    confidence: float = 0.5
     dossier: str = ""
     rationale: str = ""
 
     @property
     def edge(self) -> float:
         return self.p_final - self.market_price
+
+    @property
+    def p_ensemble(self) -> float:
+        return sum(self.p_forecasters) / len(self.p_forecasters)
 
 
 class ForecastPipeline:
@@ -124,14 +139,20 @@ class ForecastPipeline:
         )
         return self._parse(self.settings.light_model, prompt, PlanOut, max_tokens=4000)
 
-    def research(self, market: Market, plan: PlanOut) -> str:
+    def research(self, market: Market, plan: PlanOut, evidence_notes: str) -> str:
         queries = "\n".join(f"- {q}" for q in plan.research_queries)
+        tools_section = (
+            f"\n\nStructured data already gathered by non-LLM tools:\n{evidence_notes}"
+            if evidence_notes else ""
+        )
         prompt = (
             "Gather evidence for a probabilistic forecast. Search the web for the most recent, "
             "decision-relevant information, then write an evidence dossier: dated facts, base rates, "
             "expert/insider signals, and anything that cuts against the obvious answer. "
-            "Cite dates. Do NOT state a probability.\n\n"
+            "Cite dates. Do NOT state a probability, and do NOT report or guess this market's "
+            "own current price - downstream forecasters must stay price-blind.\n\n"
             f"{_market_brief(market, with_price=False)}\n\nSuggested searches:\n{queries}"
+            f"{tools_section}"
         )
         messages = [{"role": "user", "content": prompt}]
         tools = [{
@@ -178,35 +199,48 @@ class ForecastPipeline:
         out.probability = _clamp(out.probability)
         return out
 
-    def critique(self, market: Market, evidence: str, forecasts: list[ForecastOut]) -> CritiqueOut:
+    def critique(
+        self, market: Market, evidence: str, forecasts: list[ForecastOut], price_notes: str
+    ) -> CritiqueOut:
         panel = "\n\n".join(
             f"Forecaster {i + 1}: p={f.probability:.2f}\n{f.rationale}" for i, f in enumerate(forecasts)
         )
+        snapshot = f"\n\nMarket microstructure (revealed only at this stage):\n{price_notes}" if price_notes else ""
         prompt = (
-            "You are an adversarial reviewer of a forecasting panel. The panel did NOT see the "
-            "market price; you do. The market aggregates real-money opinion - if the panel "
-            "diverges from it, either the panel found real edge or it is missing something. "
-            "Attack the panel's reasoning: stale evidence, ignored base rates, misread resolution "
-            "rules, wishful thinking. Then give your revised probability of YES.\n\n"
-            f"{_market_brief(market, with_price=True)}\n\nEvidence:\n{evidence}\n\nPanel:\n{panel}"
+            "You are an adversarial reviewer (devil's advocate) of a forecasting panel. The panel "
+            "did NOT see the market price; you do. The market aggregates real-money opinion - if "
+            "the panel diverges from it, either the panel found real edge or it is missing "
+            "something. Attack the panel's reasoning: stale evidence, ignored base rates, misread "
+            "resolution rules, wishful thinking. Flag price moves with no visible catalyst and "
+            "thin markets whose price deserves less deference. Then give your revised probability "
+            "of YES.\n\n"
+            f"{_market_brief(market, with_price=True)}{snapshot}\n\n"
+            f"Evidence:\n{evidence}\n\nPanel:\n{panel}"
         )
         out = self._parse(self.settings.heavy_model, prompt, CritiqueOut, thinking=True)
         out.revised_probability = _clamp(out.revised_probability)
         return out
 
-    def integrate(self, market: Market, evidence: str, forecasts: list[ForecastOut], crit: CritiqueOut) -> FinalOut:
+    def integrate(
+        self, market: Market, evidence: str, forecasts: list[ForecastOut],
+        crit: CritiqueOut, price_notes: str,
+    ) -> FinalOut:
         panel = "\n".join(f"Forecaster {i + 1}: {f.probability:.2f}" for i, f in enumerate(forecasts))
+        snapshot = f"\n\nMarket microstructure:\n{price_notes}" if price_notes else ""
         prompt = (
             "Produce the final probability that this question resolves YES, integrating the "
             "independent panel, the adversarial critique, and the market price. Deviate from the "
-            "market only where the evidence justifies it; stay calibrated.\n\n"
-            f"{_market_brief(market, with_price=True)}\n\nEvidence:\n{evidence}\n\n"
-            f"Panel probabilities:\n{panel}\n\n"
+            "market only where the evidence justifies it; a thin or spiking market deserves less "
+            "deference than a deep one. Stay calibrated.\n\n"
+            f"{_market_brief(market, with_price=True)}{snapshot}\n\n"
+            f"Evidence:\n{evidence}\n\nPanel probabilities:\n{panel}\n\n"
             f"Critique (revised p={crit.revised_probability:.2f}):\n{crit.critique}\n\n"
-            "Give the final probability (0-1) and a 3-5 sentence rationale."
+            "Give: the final probability (0-1); your confidence in that probability (0-1, how "
+            "much you would stake on this estimate vs the market's); and a 3-5 sentence rationale."
         )
         out = self._parse(self.settings.heavy_model, prompt, FinalOut, thinking=True)
         out.probability = _clamp(out.probability)
+        out.confidence = min(max(out.confidence, 0.0), 1.0)
         return out
 
     def baseline(self, market: Market) -> float:
@@ -220,11 +254,22 @@ class ForecastPipeline:
     # ------------------------------------------------------------- driver
 
     def run(self, market: Market) -> PipelineResult:
+        from . import research_tools
+
         plan = self.plan(market)
+
+        # Stage 2a: non-LLM tool fanout. The market's own snapshot (price level,
+        # momentum) is held back from every price-blind stage and revealed to the
+        # critic at stage 5; sister-market data is ordinary evidence.
+        tool_sections = research_tools.run_tools(market)
+        price_notes = tool_sections.pop("market_snapshot", "")
+        evidence_notes = "\n\n".join(f"[{k}]\n{v}" for k, v in tool_sections.items())
+
+        # Stage 2b: LLM web research on top of the tool output.
         try:
-            dossier = self.research(market, plan)
+            dossier = self.research(market, plan, evidence_notes)
         except Exception as exc:  # web search may be unavailable on some orgs/plans
-            dossier = f"(research stage unavailable: {exc})"
+            dossier = (evidence_notes + f"\n\n(web research unavailable: {exc})").strip()
         evidence = self.synthesize(market, dossier) if len(dossier) > 2000 else dossier
 
         with ThreadPoolExecutor(max_workers=self.settings.n_forecasters) as pool:
@@ -233,8 +278,8 @@ class ForecastPipeline:
                 PERSONAS[: self.settings.n_forecasters],
             ))
 
-        crit = self.critique(market, evidence, forecasts)
-        final = self.integrate(market, evidence, forecasts, crit)
+        crit = self.critique(market, evidence, forecasts, price_notes)
+        final = self.integrate(market, evidence, forecasts, crit, price_notes)
         p_baseline = self.baseline(market)
 
         return PipelineResult(
@@ -244,6 +289,7 @@ class ForecastPipeline:
             p_critic=crit.revised_probability,
             p_final=final.probability,
             p_baseline=p_baseline,
+            confidence=final.confidence,
             dossier=evidence,
             rationale=final.rationale,
         )

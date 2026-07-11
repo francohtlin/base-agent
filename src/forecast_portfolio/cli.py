@@ -66,9 +66,9 @@ def cmd_forecast(args, settings: Settings):
         result = pipeline.run(m)
         scan_id = ledger.record_scan(m, result)
         pf = ", ".join(f"{p:.2f}" for p in result.p_forecasters)
-        print(f"    forecasters [{pf}]  critic {result.p_critic:.2f}  "
-              f"final {result.p_final:.2f}  baseline {result.p_baseline:.2f}  "
-              f"edge {result.edge:+.2f}")
+        print(f"    ensemble [base-rate, evidence, contrarian] = [{pf}]  critic {result.p_critic:.2f}")
+        print(f"    final {result.p_final:.2f}  baseline {result.p_baseline:.2f}  "
+              f"edge {result.edge:+.2f}  confidence {result.confidence:.2f}")
         if args.no_trade:
             continue
         trade = ledger.maybe_open_trade(m, result, settings, scan_id)
@@ -175,27 +175,64 @@ def cmd_report(args, settings: Settings):
     else:
         print("  (no resolved scans yet)")
 
-    # ---- IC / directional accuracy vs subsequent market movement
-    scans = [
-        ScanPoint(
-            market_id=r["market_id"],
-            ts=datetime.fromisoformat(r["ts"]),
-            price=r["market_price"],
-            edge=r["edge"],
-        )
-        for r in ledger.all_scans()
-    ]
+    # ---- per-stage IC vs subsequent market movement (the paper's headline chart)
+    all_rows = ledger.all_scans()
     marks = {
-        s.market_id: [(datetime.fromisoformat(m["ts"]), m["yes_price"])
-                      for m in ledger.marks_for(s.market_id)]
-        for s in scans
+        r["market_id"]: [(datetime.fromisoformat(m["ts"]), m["yes_price"])
+                         for m in ledger.marks_for(r["market_id"])]
+        for r in all_rows
     }
-    print("\n== Edge vs subsequent market movement ==")
-    print("  horizon    n     IC      dir.acc")
-    for h in (1, 3, 7, 14):
-        pp = edge_move_pairs(scans, marks, horizon_days=h)
-        print(f"  t+{h:<2}d   {len(pp):4} {_fmt(information_coefficient(pp), 7)} "
-              f"{_fmt(directional_accuracy(pp), 9, 2)}")
+    horizons = (1, 3, 7, 14)
+
+    def _ensemble(r):
+        if r["p_f1"] is None:
+            return None
+        return (r["p_f1"] + r["p_f2"] + r["p_f3"]) / 3
+
+    stages = [
+        ("zero-shot", lambda r: r["p_baseline"]),
+        ("base-rate", lambda r: r["p_f1"]),
+        ("evidence-driven", lambda r: r["p_f2"]),
+        ("contrarian", lambda r: r["p_f3"]),
+        ("ensemble (avg)", _ensemble),
+        ("critic", lambda r: r["p_critic"]),
+        ("final (post-critic)", lambda r: r["p_final"]),
+    ]
+
+    def stage_pairs(prob_fn, horizon):
+        points = []
+        for r in all_rows:
+            p = prob_fn(r)
+            if p is None:
+                continue
+            points.append(ScanPoint(
+                market_id=r["market_id"], ts=datetime.fromisoformat(r["ts"]),
+                price=r["market_price"], edge=p - r["market_price"],
+            ))
+        return edge_move_pairs(points, marks, horizon_days=horizon)
+
+    final_counts = {h: len(stage_pairs(stages[-1][1], h)) for h in horizons}
+    print("\n== Information coefficient by stage (edge vs subsequent move) ==")
+    print("  stage                " + "".join(f"   t+{h:<2}d " for h in horizons))
+    print("  n =                  " + "".join(f"  {final_counts[h]:5}  " for h in horizons))
+    for name, fn in stages:
+        cells = "".join(f" {_fmt(information_coefficient(stage_pairs(fn, h)), 7)}" for h in horizons)
+        print(f"  {name:20}{cells}")
+
+    # ---- conviction: IC by |edge| bucket (paper: only 15+pp edges carry signal)
+    buckets = [("<5pp", 0.0, 0.05), ("5-15pp", 0.05, 0.15), ("15+pp", 0.15, 1.01)]
+    print("\n== Conviction: final-stage IC by |edge| bucket ==")
+    print("  bucket   " + "".join(f"      t+{h:<2}d " for h in horizons))
+    for label, lo, hi in buckets:
+        cells = ""
+        for h in horizons:
+            pp = [(e, m) for e, m in stage_pairs(stages[-1][1], h) if lo <= abs(e) < hi]
+            cells += f" {_fmt(information_coefficient(pp), 7)}({len(pp):2})"
+        print(f"  {label:8}{cells}")
+
+    da = {h: directional_accuracy(stage_pairs(stages[-1][1], h)) for h in horizons}
+    print("\n  directional accuracy (final): "
+          + "  ".join(f"t+{h}d {_fmt(da[h], 5, 2)}" for h in horizons))
     print("\n(IC needs repeated `fp mark` runs to accumulate price follow-ups.)")
     ledger.close()
 

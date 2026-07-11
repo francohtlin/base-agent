@@ -66,6 +66,8 @@ def _f(value, default: float = 0.0) -> float:
 def parse_kalshi(m: dict) -> Optional[Market]:
     if m.get("market_type") != "binary":
         return None
+    if m.get("mve_collection_ticker"):  # auto-generated multivariate parlay combos
+        return None
     bid, ask = _f(m.get("yes_bid_dollars")), _f(m.get("yes_ask_dollars"))
     if 0 < bid <= ask < 1:
         price = (bid + ask) / 2
@@ -96,14 +98,22 @@ def parse_kalshi(m: dict) -> Optional[Market]:
 
 
 def fetch_kalshi(limit: int = 100) -> list[Market]:
+    """Fetch via /events with nested markets: the raw /markets feed is dominated
+    by thousands of zero-priced auto-generated parlay combos (newest-first), so
+    the curated events surface is the usable one. `limit` = events requested;
+    each event carries several markets."""
     with httpx.Client(timeout=_TIMEOUT) as client:
-        r = client.get(f"{KALSHI_BASE}/markets", params={"status": "open", "limit": min(limit, 1000)})
+        r = client.get(
+            f"{KALSHI_BASE}/events",
+            params={"status": "open", "limit": min(limit, 200), "with_nested_markets": "true"},
+        )
         r.raise_for_status()
     out = []
-    for raw in r.json().get("markets", []):
-        parsed = parse_kalshi(raw)
-        if parsed:
-            out.append(parsed)
+    for event in r.json().get("events", []):
+        for raw in event.get("markets") or []:
+            parsed = parse_kalshi(raw)
+            if parsed:
+                out.append(parsed)
     return out
 
 

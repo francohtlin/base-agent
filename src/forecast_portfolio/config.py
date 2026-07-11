@@ -12,7 +12,9 @@ class Settings:
     heavy_model: str = field(default_factory=lambda: _env("FP_HEAVY_MODEL", "claude-opus-4-8"))
     light_model: str = field(default_factory=lambda: _env("FP_LIGHT_MODEL", "claude-sonnet-5"))
     stake_usd: float = field(default_factory=lambda: float(_env("FP_STAKE_USD", "100")))
-    edge_threshold: float = field(default_factory=lambda: float(_env("FP_EDGE_THRESHOLD", "0.05")))
+    # The paper's conviction analysis: only edges above ~15pp hold a clearly
+    # positive information coefficient, and those are what its agent trades on.
+    edge_threshold: float = field(default_factory=lambda: float(_env("FP_EDGE_THRESHOLD", "0.15")))
     min_liquidity: float = field(default_factory=lambda: float(_env("FP_MIN_LIQUIDITY", "1000")))
     min_days: float = field(default_factory=lambda: float(_env("FP_MIN_DAYS", "1")))
     max_days: float = field(default_factory=lambda: float(_env("FP_MAX_DAYS", "120")))

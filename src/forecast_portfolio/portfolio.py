@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS scans(
   p_f1 REAL, p_f2 REAL, p_f3 REAL,
   p_critic REAL, p_final REAL, p_baseline REAL,
   edge REAL,
+  confidence REAL,
   rationale TEXT,
   dossier TEXT
 );
@@ -102,13 +103,13 @@ class Ledger:
         cur = self.conn.execute(
             """INSERT INTO scans(ts, market_id, source, question, market_price, close_time,
                                  p_f1, p_f2, p_f3, p_critic, p_final, p_baseline, edge,
-                                 rationale, dossier)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                 confidence, rationale, dossier)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 _now(), market.id, market.source, market.question, market.yes_price,
                 market.close_time.isoformat() if market.close_time else None,
                 pf[0], pf[1], pf[2], result.p_critic, result.p_final, result.p_baseline,
-                result.edge, result.rationale, result.dossier,
+                result.edge, result.confidence, result.rationale, result.dossier,
             ),
         )
         self.conn.commit()

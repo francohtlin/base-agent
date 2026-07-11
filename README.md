@@ -5,10 +5,16 @@ questions with a multi-stage Claude pipeline, records simulated positions, and s
 itself with the same metrics quant forecasters use (information coefficient, Brier,
 calibration, P&L).
 
-Architecture is modeled on NYU Agentic Learning AI Lab's live agent at
-[forecast.agenticlearning.ai](https://forecast.agenticlearning.ai) — see
-[PLAN.md](PLAN.md) for the full design, the mapping to their seven-stage pipeline, and
-the roadmap.
+Architecture follows NYU Agentic Learning AI Lab's live agent at
+[forecast.agenticlearning.ai](https://forecast.agenticlearning.ai) and its paper,
+*"Alive and Predicting: A Live Evaluation of Multi-Step Forecasting Agents"* (Wu, Dai &
+Ren, [OpenReview](https://openreview.net/pdf?id=SXVjN9VLeJ)): a stage-0–6 pipeline
+(zero-shot baseline → plan → tool research → synthesis → price-blind base-rate /
+evidence-driven / contrarian ensemble → devil's-advocate critic, where the market price
+is first revealed → final integration), with every stage probability recorded so the
+report can reproduce the paper's per-stage information-coefficient ablation and its
+conviction result (only 15+pp edges carry signal — hence the default trade threshold).
+See [PLAN.md](PLAN.md) for the full design and roadmap.
 
 **Paper only.** No orders are ever placed; market data comes from public read-only
 endpoints. Not financial advice.
@@ -57,7 +63,7 @@ scan → forecast → trade → report loop with a deterministic stub pipeline.
 | `FP_HEAVY_MODEL` | `claude-opus-4-8` | Forecasters, critic, integrator |
 | `FP_LIGHT_MODEL` | `claude-sonnet-5` | Plan, research, synthesis, baseline |
 | `FP_STAKE_USD` | `100` | Fixed stake per paper position |
-| `FP_EDGE_THRESHOLD` | `0.05` | Minimum \|p_final − price\| to open a trade |
+| `FP_EDGE_THRESHOLD` | `0.15` | Minimum \|p_final − price\| to open a trade (paper: only 15+pp edges hold positive IC) |
 | `FP_MIN_LIQUIDITY` | `1000` | Screen floor (USD-ish, per venue's own measure) |
 | `FP_MIN_DAYS` / `FP_MAX_DAYS` | `1` / `120` | Time-to-close window |
 | `FP_DB_PATH` | `data/portfolio.db` | SQLite ledger location |
@@ -67,13 +73,14 @@ scan → forecast → trade → report loop with a deterministic stub pipeline.
 
 ```
 src/forecast_portfolio/
-  markets.py    Kalshi + Polymarket clients, unified Market model, screening
-  pipeline.py   7-stage Claude pipeline (plan → research → synthesize →
-                3× blind forecast → critique → integrate → baseline)
-  portfolio.py  SQLite ledger: scans, trades, marks, resolution, P&L
-  metrics.py    Brier, log loss, calibration, IC, directional accuracy
-  cli.py        fp entrypoint
-tests/          offline unit tests (mock pipeline, fixture payloads)
+  markets.py         Kalshi + Polymarket clients, unified Market model, screening
+  research_tools.py  non-LLM tool fanout: market snapshot, sister markets (pluggable)
+  pipeline.py        stage 0-6 Claude pipeline (baseline · plan · research ·
+                     synthesize · blind 3-perspective ensemble · critic · final)
+  portfolio.py       SQLite ledger: scans, trades, marks, resolution, P&L
+  metrics.py         Brier, log loss, calibration, IC, directional accuracy
+  cli.py             fp entrypoint
+tests/               offline unit tests (mock pipeline, fixture payloads)
 ```
 
 ## Development
