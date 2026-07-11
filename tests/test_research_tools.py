@@ -1,5 +1,6 @@
 from forecast_portfolio.research_tools import (
-    format_kalshi_snapshot, format_polymarket_snapshot, format_sisters,
+    PRICE_TOOLS, format_kalshi_orderbook, format_kalshi_snapshot,
+    format_polymarket_snapshot, format_sisters,
 )
 
 KALSHI_RAW = {
@@ -27,6 +28,29 @@ def test_polymarket_snapshot_momentum():
     text = format_polymarket_snapshot(POLY_RAW)
     assert "7d +0.18" in text  # the "spike with no catalyst" signal
     assert "spread 0.02" in text
+
+
+def test_kalshi_orderbook_implied_ask_and_depth():
+    raw = {"orderbook_fp": {
+        "yes_dollars": [["0.0400", "878.89"], ["0.0600", "48.00"], ["0.0100", "169.00"]],
+        "no_dollars": [["0.9300", "397.94"], ["0.9200", "361.10"], ["0.0100", "1002.00"]],
+    }}
+    text = format_kalshi_orderbook(raw)
+    # best yes bid 0.06; best no bid 0.93 -> implied yes ask 0.07
+    assert "Best YES bid 0.06" in text
+    assert "implied YES ask 0.07" in text
+    assert "spread 0.01" in text
+    # depth within 5c of top (inclusive): 48 + 878.89 + 169 = 1095.89 -> "1,096"
+    assert "1,096 contracts bid YES" in text
+    assert "759 bid NO" in text
+
+    assert format_kalshi_orderbook({"orderbook_fp": {}}) is None
+
+
+def test_price_tools_cover_own_price_leaks():
+    # Anything that reveals the market's own price must be on the withheld list.
+    assert "market_snapshot" in PRICE_TOOLS
+    assert "kalshi_orderbook" in PRICE_TOOLS
 
 
 def test_sisters_excludes_self_and_caps():

@@ -36,6 +36,8 @@ class Market:
     url: str
     status: str = "open"  # open | closed | settled
     resolution: Optional[str] = None  # "yes" | "no" once settled
+    yes_bid: Optional[float] = None  # best bid/ask when the venue exposes them —
+    yes_ask: Optional[float] = None  # paper trades fill by crossing this spread
 
     @property
     def days_to_close(self) -> Optional[float]:
@@ -69,10 +71,8 @@ def parse_kalshi(m: dict) -> Optional[Market]:
     if m.get("mve_collection_ticker"):  # auto-generated multivariate parlay combos
         return None
     bid, ask = _f(m.get("yes_bid_dollars")), _f(m.get("yes_ask_dollars"))
-    if 0 < bid <= ask < 1:
-        price = (bid + ask) / 2
-    else:
-        price = _f(m.get("last_price_dollars"))
+    has_book = 0 < bid <= ask < 1
+    price = (bid + ask) / 2 if has_book else _f(m.get("last_price_dollars"))
     if not 0 < price < 1:
         return None
     status = m.get("status", "open")
@@ -94,6 +94,8 @@ def parse_kalshi(m: dict) -> Optional[Market]:
         url=f"https://kalshi.com/markets/{m['ticker']}",
         status="settled" if status == "settled" else ("closed" if status in ("closed", "finalized") else "open"),
         resolution=result if result in ("yes", "no") else None,
+        yes_bid=bid if has_book else None,
+        yes_ask=ask if has_book else None,
     )
 
 
@@ -137,10 +139,8 @@ def parse_polymarket(m: dict) -> Optional[Market]:
     if [o.lower() for o in outcomes] != ["yes", "no"] or len(prices) != 2:
         return None
     bid, ask = _f(m.get("bestBid")), _f(m.get("bestAsk"))
-    if 0 < bid <= ask < 1:
-        price = (bid + ask) / 2
-    else:
-        price = _f(prices[0], _f(m.get("lastTradePrice")))
+    has_book = 0 < bid <= ask < 1
+    price = (bid + ask) / 2 if has_book else _f(prices[0], _f(m.get("lastTradePrice")))
     closed = bool(m.get("closed"))
     resolution = None
     if closed and prices[0] in ("1", "0"):
@@ -160,6 +160,8 @@ def parse_polymarket(m: dict) -> Optional[Market]:
         url=f"https://polymarket.com/market/{m.get('slug', m['id'])}",
         status="settled" if resolution else ("closed" if closed else "open"),
         resolution=resolution,
+        yes_bid=bid if has_book else None,
+        yes_ask=ask if has_book else None,
     )
 
 

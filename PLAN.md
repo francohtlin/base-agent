@@ -1,38 +1,52 @@
 # Build Plan — Paper Portfolio for Kalshi/Polymarket Forecasting
 
-Modeled on NYU Agentic Learning AI Lab's live forecasting agent
-([forecast.agenticlearning.ai](https://forecast.agenticlearning.ai)) and the paper
-behind it: **"Alive and Predicting: A Live Evaluation of Multi-Step Forecasting
-Agents"** — Will Wu, Hui Dai, Mengye Ren (NYU / UChicago),
-[OpenReview SXVjN9VLeJ](https://openreview.net/pdf?id=SXVjN9VLeJ). The paper's framing:
-LLM forecasters are usually scored only on final probabilities for already-resolved
-questions; instead, deploy the agent live, record every intermediate forecast, evidence
-item, and tool call, and ask which stages and tools actually contribute accuracy. This
-repo reimplements that architecture as a self-hosted paper portfolio.
+Reimplements the system from **"Alive and Predicting: A Live Evaluation of Multi-Step
+Forecasting Agents"** — Will Wu, Hui Dai, Mengye Ren (NYU / UChicago), ICML 2026
+Workshop on Forecasting as a New Frontier of Intelligence
+([OpenReview SXVjN9VLeJ](https://openreview.net/pdf?id=SXVjN9VLeJ)) — live at
+[forecast.agenticlearning.ai](https://forecast.agenticlearning.ai). The paper's
+framing: LLM forecasters are usually scored only on final probabilities for
+already-resolved questions; instead, deploy the agent live, record every intermediate
+forecast, evidence item, and tool call, and ask which stages and tools actually
+contribute accuracy. Their headline sample: 335 scans over 269 unique Kalshi markets
+across a 4-week window.
 
-## The reference pipeline (paper, Fig. "Agent Pipeline")
+## The reference pipeline (paper §2 + Appendix B)
 
-| Stage | Name | What it does | Sees market price? |
-|---|---|---|---|
-| 0 | Zero-shot baseline | Single LLM call, no tools → p̂₀; runs in parallel on the same question with the same evidence cutoff | no |
-| 1 | Plan | Decompose the question, pick tools | no |
-| 2 | Research | **10 conditional tools**: FRED, code, Wiki, Kalshi, orderbook, articles, web, Congress, courts, earnings | no (tools may read prices; blind stages don't see the primary market's) |
-| 3 | Synthesise | Score the evidence | no |
-| 4 | Ensemble | Three price-blind perspectives — **base-rate, evidence-driven, contrarian** → p̂₄ | **no** |
-| 5 | Critic | Devil's advocate; market price revealed *here* for the first time | **yes** |
-| 6 | Final | Integrate everything → p̂₆ + confidence | yes |
+| Stage | Name | Tier | What it does | Sees price? |
+|---|---|---|---|---|
+| 0 | Zero-shot baseline | frontier | Single call on title/rules/dates, no tools → p̂₀; runs in parallel with the same evidence cutoff | no |
+| 1 | Plan | fast | Classify the question, decompose into **2–5 weighted binary sub-questions**, select tools | no |
+| 2 | Research | no LLM | Execute the selected tools in parallel (10-tool inventory, mean 5.4 used/scan) | tools read prices; blind stages never see the primary market's |
+| 3 | Synthesis | fast | Label each evidence item: **strength, credibility 1–100, direction, priced-in** | no |
+| 4 | Ensemble | 3× frontier | **base-rate / evidence-driven / contrarian** (verbatim prompts in Appendix B) → p̂₄ = simple average | **no** |
+| 5 | Critic | frontier | Devil's advocate challenges the ensemble for reasoning flaws and math errors; price revealed *here* | **yes** |
+| 6 | Final | frontier | Integrate critique + price → p̂₆ **+ confidence** | yes |
 
-Every stage probability is recorded, which enables the paper's two headline analyses:
+Six forecasts per scan: {p̂₀, p̂₄ₐ, p̂₄ᵦ, p̂₄𝒸, p̂₄, p̂₆}. Paper models: Claude Sonnet 4.6
+(fast tier), Claude Opus 4.7 (frontier tier).
 
-- **Per-stage IC over days 1–30 after forecast**: final (post-critic) tops the chart at
-  ≈ 0.15–0.20; ensemble average and individual perspectives sit below it; zero-shot is
-  lowest (≈ 0.02–0.08). The pipeline, not the base model, is where the signal lives.
-- **Conviction**: grouping scans by |edge|, **only edges above ~15 percentage points
-  hold a clearly positive IC** (≈ 0.2–0.3); sub-5pp and 5–15pp edges hover at zero or
-  negative. The trading agent typically trades only on 15+pp calls.
+### The paper's results (what this repo's report is built to reproduce)
 
-Trades are simulated fixed-dollar positions; performance is IC (magnitude-aware,
-field-standard), directional accuracy, win rate, and P&L.
+- **Mean IC over t+1…t+14**: final (post-critic) **+0.17** [0.00, +0.33], ensemble
+  average **+0.14**, zero-shot **+0.05**, mean-reversion (p=0.5) **+0.05**. Final is
+  the only stage whose 95% bootstrap CI has a non-negative lower bound, and it tops
+  every horizon t+1…t+30. The margin is largest in the first two weeks — the market
+  then converges toward the agent's earlier view.
+- **The critic's gain looks like calibration, not new reasoning**: the trace shows it
+  mainly pulling the ensemble toward the market price (+0.14 → +0.17).
+- **Diversity collapse**: on 38% of scans the three perspectives differ by < 0.02
+  (mean spread 4.3pp, 12% fully degenerate) — the ensemble average adds little over
+  any single perspective (all within ±0.03 IC).
+- **Conviction is everything**: splitting by |edge| — <5pp (n=141), 5–15pp (n=115),
+  15+pp (n=79) — **only 15+pp calls hold a clearly positive IC at every horizon**.
+  The trading agent takes positions only on those.
+- **Per-tool ΔIC** (IC with tool − IC without): wikipedia_lookup **+0.25**,
+  kalshi_orderbook **+0.13**, earnings +0.05; court_docket −0.12, code_execution
+  −0.24, fred_data −0.26, congress_bills −0.27. The paper reads negative values as
+  selection/usage misalignment, not proof the data is useless.
+- **Paper trading**: positions sized by the final forecast at the prevailing price,
+  simulated with **realistic bid/ask spreads from the orderbook**; no real capital.
 
 ## Architecture of this repo
 
@@ -68,24 +82,27 @@ field-standard), directional accuracy, win rate, and P&L.
 
 ### Deviations from the reference, and why
 
-- **Research fanout is 2 native tools + web search, not 10.** `research_tools.py`
-  implements the market-native tools the paper's example forecast leans on —
-  `market_snapshot` (bid/ask, spread, 1d/7d/30d momentum, volume, open interest ≈ the
-  paper's Kalshi/orderbook tools) and `sister_markets` (prices of other markets in the
-  same event — the "sister market 34%" signal). Web/news/wiki evidence comes from
-  Claude's server-side `web_search` tool. FRED, Congress, courts, earnings are declared
-  future slots: each is one function added to `TOOLS`.
+- **Tool inventory is evidence-driven, not complete.** `research_tools.py` implements
+  the tools the paper's own ablation rewards: `wikipedia_lookup` (ΔIC +0.25, its best
+  conditional tool), `kalshi_orderbook` (+0.13), `market_snapshot` (≈ its
+  always-invoked kalshi_data), and `sister_markets` (the relative-value signal in its
+  example forecast). Web/news evidence comes from Claude's server-side `web_search`
+  tool. We **deliberately omit** code_execution, FRED, Congress bills, and court
+  docket — all negative ΔIC in the paper — until a better selection policy earns them
+  back. Each is one function away (`TOOLS` in research_tools.py).
 - **Price-blind boundary**: the paper reveals the market price at stage 5. We enforce
-  that by withholding the *primary market's own snapshot* (level and momentum) from
-  research/synthesis/ensemble and handing it to the critic and final stages only;
-  sister-market prices count as ordinary evidence. (The paper's example shows momentum
-  surfacing pre-critic; we hold back both level and momentum — strictly blinder.)
-- **Models**: heavy stages default to `claude-opus-4-8`, light stages to
-  `claude-sonnet-5` (both configurable via env). Planning/synthesis are cheap glue; the
-  ensemble/critic/final steps are where capability pays. The paper's ensemble mixes
-  model families (Opus + a non-Claude model); ours uses one family with three
-  perspective prompts — the perspective names and order match the paper exactly
-  (base-rate, evidence-driven, contrarian → ledger columns p_f1/p_f2/p_f3).
+  that by withholding the PRICE_TOOLS sections (own-market snapshot *and* orderbook)
+  from research/synthesis/ensemble and handing them to the critic and final stages
+  only; sister-market prices count as ordinary evidence.
+- **Models**: paper = Sonnet 4.6 fast tier (stages 1, 3) + Opus 4.7 frontier tier
+  (stages 0, 4, 5, 6). Ours = the current equivalents, `claude-sonnet-5` and
+  `claude-opus-4-8`, same stage assignment — including the zero-shot baseline on the
+  frontier model, so the multi-step gain can't be explained by model capability.
+- **Ensemble prompts are the paper's, verbatim** (Appendix B), in fixed order →
+  ledger columns p_f1/p_f2/p_f3. Expect the paper's diversity collapse (38% of scans
+  within 2pp) — the critic stage, not the ensemble spread, is where the extra IC
+  comes from. We additionally record the critic's own revised probability (a 7th
+  data point the paper doesn't log) for finer ablation.
 - **Perspective diversity via prompts, not temperature** — current Opus models don't
   accept sampling parameters, and the paper's own decorrelation mechanism is the
   perspective framing.
@@ -94,15 +111,17 @@ field-standard), directional accuracy, win rate, and P&L.
 
 - **Universe screen**: binary markets only; yes-price in [0.05, 0.95]; liquidity/volume
   above floor; closes between 1 and 120 days out.
-- **Entry**: run the pipeline; `edge = p_final − market_yes_price`. If `edge ≥ +τ` buy
-  YES at the ask-ish price; if `edge ≤ −τ` buy NO at `1 − price`. **Default τ = 15pp**,
-  straight from the paper's conviction result — only 15+pp edges carry positive IC.
-  Fixed stake $100 per position (both configurable). One open position per market.
+- **Entry**: run the pipeline; `edge = p_final − market_yes_price` (mid). If
+  `edge ≥ +τ` buy YES **at the ask**; if `edge ≤ −τ` buy NO **at 1 − bid** — fills
+  cross the spread like the paper's simulated trades (mid-price fallback when the
+  venue exposes no book). **Default τ = 15pp**, straight from the paper's conviction
+  result — only 15+pp edges carry positive IC. Fixed stake $100 per position (both
+  configurable). One open position per market.
 - **Marking**: `fp mark` re-fetches prices for every scanned market — this both marks
   open positions to market and accumulates the price-followup series that IC needs.
 - **Exit**: hold to resolution (payout $1/contract) by default; `fp resolve --auto`
   detects settled markets from the exchange APIs.
-- No fees/slippage modeled in v1 (flagged below as future work).
+- Spreads are modeled (entries cross bid/ask); exchange fees are not yet.
 
 ### Evaluation
 

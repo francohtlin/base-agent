@@ -1,9 +1,10 @@
 """SQLite ledger: scans (all stage probabilities), paper trades, price marks,
 and resolutions.
 
-Trade mechanics (mirrors exchange payoffs, no fees in v1):
-  buy YES at price p:      contracts = stake / p        wins $1/contract if YES
-  buy NO  at price 1 - p:  contracts = stake / (1 - p)  wins $1/contract if NO
+Trade mechanics (mirrors exchange payoffs; fills cross the bid/ask spread like
+the paper's simulated trades — mid-price fallback when the venue exposes no book):
+  buy YES at the ask a:        contracts = stake / a        wins $1/contract if YES
+  buy NO  at 1 - bid:          contracts = stake / (1 - b)  wins $1/contract if NO
 """
 
 from __future__ import annotations
@@ -132,7 +133,11 @@ class Ledger:
         if abs(edge) < settings.edge_threshold or self.has_open_trade(market.id):
             return None
         side = "yes" if edge > 0 else "no"
-        entry = market.yes_price if side == "yes" else 1 - market.yes_price
+        # Fill by crossing the spread: buy YES at the ask, buy NO at 1 - bid.
+        if side == "yes":
+            entry = market.yes_ask if market.yes_ask else market.yes_price
+        else:
+            entry = 1 - (market.yes_bid if market.yes_bid else market.yes_price)
         if not 0 < entry < 1:
             return None
         contracts = settings.stake_usd / entry

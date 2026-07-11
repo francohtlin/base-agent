@@ -29,9 +29,28 @@ from .config import Settings
 from .markets import Market
 
 
+class SubQuestion(BaseModel):
+    question: str
+    weight: float
+
+
 class PlanOut(BaseModel):
-    key_questions: list[str]
+    category: str
+    sub_questions: list[SubQuestion]  # 2-5 weighted binary sub-questions (paper, stage 1)
     research_queries: list[str]
+    wikipedia_topics: list[str]  # 0-3 topics for the base-rate lookup
+
+
+class EvidenceItem(BaseModel):
+    fact: str
+    strength: str  # strong | moderate | weak
+    credibility: int  # 1-100 (paper, stage 3)
+    direction: str  # yes | no | neutral
+    priced_in: bool
+
+
+class SynthesisOut(BaseModel):
+    items: list[EvidenceItem]
 
 
 class ForecastOut(BaseModel):
@@ -54,15 +73,21 @@ class BaselineOut(BaseModel):
     probability: float
 
 
-# The paper's three ensemble perspectives, in this fixed order (the ledger maps
-# them to columns p_f1/p_f2/p_f3):
+# The paper's three ensemble perspectives, verbatim from Appendix B, in this
+# fixed order (the ledger maps them to columns p_f1/p_f2/p_f3):
 PERSONAS = [
-    "a BASE-RATE forecaster: anchor on reference classes and historical base rates "
-    "before any story-specific detail; ask 'how often do situations like this resolve YES?'",
-    "an EVIDENCE-DRIVEN forecaster: weigh the concrete retrieved evidence most heavily - "
-    "recent developments, primary sources, causal mechanics - and update hard on it",
-    "a CONTRARIAN forecaster: assume the consensus narrative is wrong; build the strongest "
-    "case for the unpopular resolution and only concede what the evidence forces you to",
+    # base-rate
+    "You anchor heavily on historical frequencies and reference classes before considering "
+    "specific evidence. Start from 'how often does this type of event happen?' and only "
+    "deviate with strong evidence.",
+    # evidence-driven
+    "You weight recent, specific evidence most heavily. Focus on what has CHANGED recently: "
+    "new information, breaking developments, and shifts that make this situation different "
+    "from historical base rates.",
+    # contrarian
+    "You actively look for reasons the consensus might be wrong. What are people overlooking? "
+    "What scenario would surprise most observers? Weight evidence against the popular "
+    "narrative more heavily.",
 ]
 
 
@@ -134,12 +159,19 @@ class ForecastPipeline:
         prompt = (
             "You are planning research for a probabilistic forecast on a prediction-market question.\n\n"
             f"{_market_brief(market, with_price=False)}\n\n"
-            "List the 3-5 key sub-questions that determine the outcome, and 3-5 concrete web "
-            "search queries that would surface the most decision-relevant, recent evidence."
+            "Produce:\n"
+            "- category: one of politics, economics, science, geopolitics, tech, legal, culture, general\n"
+            "- sub_questions: 2-5 weighted binary sub-questions that determine the outcome "
+            "(weights sum to ~1.0)\n"
+            "- research_queries: 3-5 concrete web search queries for the most decision-relevant, "
+            "recent evidence\n"
+            "- wikipedia_topics: 0-3 Wikipedia article topics that would give base rates or key "
+            "background facts (e.g. 'List of FIFA World Cup finals', a person, a treaty)"
         )
         return self._parse(self.settings.light_model, prompt, PlanOut, max_tokens=4000)
 
     def research(self, market: Market, plan: PlanOut, evidence_notes: str) -> str:
+        subqs = "\n".join(f"- ({q.weight:.0%}) {q.question}" for q in plan.sub_questions)
         queries = "\n".join(f"- {q}" for q in plan.research_queries)
         tools_section = (
             f"\n\nStructured data already gathered by non-LLM tools:\n{evidence_notes}"
@@ -151,7 +183,9 @@ class ForecastPipeline:
             "expert/insider signals, and anything that cuts against the obvious answer. "
             "Cite dates. Do NOT state a probability, and do NOT report or guess this market's "
             "own current price - downstream forecasters must stay price-blind.\n\n"
-            f"{_market_brief(market, with_price=False)}\n\nSuggested searches:\n{queries}"
+            f"{_market_brief(market, with_price=False)}\n\n"
+            f"Weighted sub-questions to resolve:\n{subqs}\n\n"
+            f"Suggested searches:\n{queries}"
             f"{tools_section}"
         )
         messages = [{"role": "user", "content": prompt}]
@@ -174,24 +208,35 @@ class ForecastPipeline:
         return "\n".join(b.text for b in resp.content if b.type == "text").strip()
 
     def synthesize(self, market: Market, dossier: str) -> str:
+        """Stage 3: label each evidence item with strength, credibility (1-100),
+        direction, and whether it is already priced in (paper, Appendix B)."""
         prompt = (
-            "Condense this research dossier to the 10-15 facts most relevant to forecasting the "
-            "question below. Keep dates and numbers. Preserve disconfirming evidence.\n\n"
+            "Extract the distinct evidence items from this research dossier for the question "
+            "below (10-15 items max, keep dates and numbers, preserve disconfirming evidence). "
+            "Label each with: strength (strong/moderate/weak), credibility (1-100), direction "
+            "(yes/no/neutral - which resolution it supports), and priced_in (would an attentive "
+            "market participant already know this?).\n\n"
             f"{_market_brief(market, with_price=False)}\n\nDossier:\n{dossier}"
         )
-        resp = self.client.messages.create(
-            model=self.settings.light_model,
-            max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}],
+        try:
+            out = self._parse(self.settings.light_model, prompt, SynthesisOut, max_tokens=8000)
+            items = out.items
+        except Exception:
+            return dossier  # labeling is an enhancement, not a gate
+        if not items:
+            return dossier
+        return "\n".join(
+            f"- [{i.strength} | cred {i.credibility}/100 | supports {i.direction.upper()}"
+            f"{' | likely priced in' if i.priced_in else ''}] {i.fact}"
+            for i in items
         )
-        return "\n".join(b.text for b in resp.content if b.type == "text").strip()
 
     def forecast_one(self, market: Market, evidence: str, persona: str) -> ForecastOut:
         prompt = (
-            f"You are {persona}.\n\n"
+            f"{persona}\n\n"
             "Estimate the probability that the following prediction-market question resolves YES. "
-            "You are deliberately NOT shown the market price - form your estimate independently. "
-            "Reason from base rates, the resolution rules, time remaining, and the evidence.\n\n"
+            "You are deliberately NOT shown the market price - form your estimate independently "
+            "from the resolution rules, time remaining, and the labeled evidence.\n\n"
             f"{_market_brief(market, with_price=False)}\n\nEvidence:\n{evidence}\n\n"
             "Give your probability (0-1) and a concise rationale."
         )
@@ -210,10 +255,10 @@ class ForecastPipeline:
             "You are an adversarial reviewer (devil's advocate) of a forecasting panel. The panel "
             "did NOT see the market price; you do. The market aggregates real-money opinion - if "
             "the panel diverges from it, either the panel found real edge or it is missing "
-            "something. Attack the panel's reasoning: stale evidence, ignored base rates, misread "
-            "resolution rules, wishful thinking. Flag price moves with no visible catalyst and "
-            "thin markets whose price deserves less deference. Then give your revised probability "
-            "of YES.\n\n"
+            "something. Attack the panel's reasoning: stale evidence, ignored base rates, math "
+            "errors, misread resolution rules, wishful thinking. Flag price moves with no visible "
+            "catalyst and thin markets whose price deserves less deference. Then give your revised "
+            "probability of YES.\n\n"
             f"{_market_brief(market, with_price=True)}{snapshot}\n\n"
             f"Evidence:\n{evidence}\n\nPanel:\n{panel}"
         )
@@ -244,11 +289,14 @@ class ForecastPipeline:
         return out
 
     def baseline(self, market: Market) -> float:
+        """Stage 0: frontier-tier single call, no tools, no price (the paper runs
+        the baseline on the same model class as the forecasters, so the multi-step
+        gain can't be explained by model capability)."""
         prompt = (
             "Without any research, estimate the probability (0-1) that this prediction-market "
             f"question resolves YES.\n\n{_market_brief(market, with_price=False)}"
         )
-        out = self._parse(self.settings.light_model, prompt, BaselineOut, max_tokens=4000)
+        out = self._parse(self.settings.heavy_model, prompt, BaselineOut, thinking=True)
         return _clamp(out.probability)
 
     # ------------------------------------------------------------- driver
@@ -258,11 +306,14 @@ class ForecastPipeline:
 
         plan = self.plan(market)
 
-        # Stage 2a: non-LLM tool fanout. The market's own snapshot (price level,
-        # momentum) is held back from every price-blind stage and revealed to the
-        # critic at stage 5; sister-market data is ordinary evidence.
-        tool_sections = research_tools.run_tools(market)
-        price_notes = tool_sections.pop("market_snapshot", "")
+        # Stage 2a: non-LLM tool fanout. PRICE_TOOLS (own-market snapshot,
+        # orderbook) are held back from every price-blind stage and revealed to
+        # the critic at stage 5; the rest is ordinary evidence.
+        tool_sections = research_tools.run_tools(market, wiki_topics=plan.wikipedia_topics)
+        price_notes = "\n\n".join(
+            f"[{name}]\n{tool_sections.pop(name)}"
+            for name in research_tools.PRICE_TOOLS if name in tool_sections
+        )
         evidence_notes = "\n\n".join(f"[{k}]\n{v}" for k, v in tool_sections.items())
 
         # Stage 2b: LLM web research on top of the tool output.
@@ -270,7 +321,10 @@ class ForecastPipeline:
             dossier = self.research(market, plan, evidence_notes)
         except Exception as exc:  # web search may be unavailable on some orgs/plans
             dossier = (evidence_notes + f"\n\n(web research unavailable: {exc})").strip()
-        evidence = self.synthesize(market, dossier) if len(dossier) > 2000 else dossier
+
+        # Stage 3: label every evidence item (strength / credibility / direction /
+        # priced-in) — falls back to the raw dossier if labeling fails.
+        evidence = self.synthesize(market, dossier)
 
         with ThreadPoolExecutor(max_workers=self.settings.n_forecasters) as pool:
             forecasts = list(pool.map(

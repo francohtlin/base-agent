@@ -74,7 +74,9 @@ scan → forecast → trade → report loop with a deterministic stub pipeline.
 ```
 src/forecast_portfolio/
   markets.py         Kalshi + Polymarket clients, unified Market model, screening
-  research_tools.py  non-LLM tool fanout: market snapshot, sister markets (pluggable)
+  research_tools.py  non-LLM tool fanout: wikipedia lookup, kalshi orderbook,
+                     market snapshot, sister markets (only positive-ΔIC tools
+                     from the paper's Table 3; negative ones deliberately omitted)
   pipeline.py        stage 0-6 Claude pipeline (baseline · plan · research ·
                      synthesize · blind 3-perspective ensemble · critic · final)
   portfolio.py       SQLite ledger: scans, trades, marks, resolution, P&L

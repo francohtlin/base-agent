@@ -190,6 +190,7 @@ def cmd_report(args, settings: Settings):
         return (r["p_f1"] + r["p_f2"] + r["p_f3"]) / 3
 
     stages = [
+        ("mean-rev (p=0.5)", lambda r: 0.5),  # the paper's mechanical baseline
         ("zero-shot", lambda r: r["p_baseline"]),
         ("base-rate", lambda r: r["p_f1"]),
         ("evidence-driven", lambda r: r["p_f2"]),

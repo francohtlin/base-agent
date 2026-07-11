@@ -17,13 +17,14 @@ def settings(tmp_path):
     return s
 
 
-def make_market(price=0.40):
+def make_market(price=0.40, bid=None, ask=None):
     return Market(
         id="kalshi:TEST-1", source="kalshi", ticker="TEST-1",
         question="Will the thing happen?", description="rules",
         yes_price=price,
         close_time=datetime.now(timezone.utc) + timedelta(days=10),
         liquidity=5000, volume=9000, url="https://example.com",
+        yes_bid=bid, yes_ask=ask,
     )
 
 
@@ -66,6 +67,23 @@ def test_trade_no_side_and_loss(settings):
 
     settled = ledger.settle(market.id, "yes")  # NO side loses
     assert settled[0].pnl == pytest.approx(-100.0)
+
+
+def test_entries_cross_the_spread(settings):
+    ledger = Ledger(settings.db_path)
+    market = make_market(price=0.40, bid=0.38, ask=0.42)
+
+    long_yes = make_result(p_final=0.60, price=0.40)
+    scan_id = ledger.record_scan(market, long_yes)
+    t = ledger.maybe_open_trade(market, long_yes, settings, scan_id)
+    assert t.side == "yes" and t.entry_price == pytest.approx(0.42)  # pays the ask
+    ledger.settle(market.id, "no")
+
+    short = make_result(p_final=0.20, price=0.40)
+    scan_id = ledger.record_scan(market, short)
+    t2 = ledger.maybe_open_trade(market, short, settings, scan_id)
+    # buys NO at 1 - bid, worse than 1 - mid: the spread costs both directions
+    assert t2.side == "no" and t2.entry_price == pytest.approx(1 - 0.38)
 
 
 def test_no_trade_below_threshold_or_duplicate(settings):
