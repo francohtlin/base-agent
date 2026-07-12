@@ -85,6 +85,20 @@ src/forecast_portfolio/
 tests/               offline unit tests (mock pipeline, fixture payloads)
 ```
 
+## Operations (going live)
+
+1. **Credentials** (the only step that needs a human): create a key at
+   console.anthropic.com and `export ANTHROPIC_API_KEY=sk-ant-...` in your shell
+   profile — or install the Anthropic CLI and run `ant auth login`.
+2. **Automated marking** — already handled by two launchd agents
+   (`scripts/install-launchd.sh` to (re)install, `scripts/uninstall-launchd.sh` to
+   remove): `fp mark` every 6 hours and `fp resolve --auto` daily at 09:15, logging to
+   `data/logs/`. Neither needs an API key.
+3. **Forecast cadence**: run `uv run fp forecast --top 3` manually (or add a third
+   launchd agent once you trust it). Each market costs roughly $0.50–1.50 in API
+   usage. The paper needed ~335 scans over 4 weeks before its IC curves stabilized —
+   don't read anything into the report before ~50 scans.
+
 ## Development
 
 ```sh

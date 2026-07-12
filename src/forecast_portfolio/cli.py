@@ -84,7 +84,10 @@ def cmd_mark(args, settings: Settings):
     ledger = Ledger(settings.db_path)
     ids = ledger.tracked_market_ids()
     if not ids:
-        sys.exit("nothing to mark - run `fp forecast` first")
+        # Not an error: the scheduled job may fire before the first forecast.
+        print("nothing to mark yet - run `fp forecast` first")
+        ledger.close()
+        return
     settled_hint = 0
     for market_id in ids:
         try:

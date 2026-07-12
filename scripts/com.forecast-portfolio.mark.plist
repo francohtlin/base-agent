@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.forecast-portfolio.mark</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>fp</string>
+    <string>mark</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/francohtlin1/forecast-portfolio</string>
+  <key>StartInterval</key>
+  <integer>21600</integer><!-- every 6 hours: 4 price follow-ups/day feed the IC series -->
+  <key>StandardOutPath</key>
+  <string>/Users/francohtlin1/forecast-portfolio/data/logs/mark.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/francohtlin1/forecast-portfolio/data/logs/mark.log</string>
+</dict>
+</plist>

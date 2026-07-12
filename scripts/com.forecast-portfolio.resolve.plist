@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.forecast-portfolio.resolve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>fp</string>
+    <string>resolve</string>
+    <string>--auto</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/francohtlin1/forecast-portfolio</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer><!-- settle finished markets daily at 09:00 local -->
+    <key>Minute</key>
+    <integer>15</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/francohtlin1/forecast-portfolio/data/logs/resolve.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/francohtlin1/forecast-portfolio/data/logs/resolve.log</string>
+</dict>
+</plist>
